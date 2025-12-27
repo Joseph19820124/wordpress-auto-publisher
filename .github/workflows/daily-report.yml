@@ -1,0 +1,120 @@
+name: Daily Publish Report
+
+on:
+  # 每天 UTC 1:00 = 北京时间 9:00
+  schedule:
+    - cron: '0 1 * * *'
+
+  # 允许手动触发测试
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get workflow runs from last 24 hours
+        id: get_runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const now = new Date();
+            const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+            // 获取 auto-publish workflow 的运行记录
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'auto-publish.yml',
+              created: `>=${yesterday.toISOString()}`,
+              per_page: 20
+            });
+
+            let total = 0;
+            let success = 0;
+            let failure = 0;
+            let details = [];
+
+            for (const run of runs.data.workflow_runs) {
+              total++;
+              if (run.conclusion === 'success') {
+                success++;
+              } else if (run.conclusion === 'failure') {
+                failure++;
+              }
+
+              // 转换为北京时间
+              const runTime = new Date(run.created_at);
+              const bjTime = new Date(runTime.getTime() + 8 * 60 * 60 * 1000);
+              const timeStr = bjTime.toISOString().replace('T', ' ').substring(0, 19);
+
+              details.push({
+                time: timeStr,
+                status: run.conclusion || 'running',
+                url: run.html_url
+              });
+            }
+
+            // 生成报告日期
+            const reportDate = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+            const dateStr = reportDate.toISOString().substring(0, 10);
+
+            // 状态评估
+            let statusEmoji = '✅';
+            let statusText = '正常';
+            if (failure > 0) {
+              statusEmoji = '⚠️';
+              statusText = '有失败';
+            }
+            if (total === 0) {
+              statusEmoji = '❓';
+              statusText = '无记录';
+            }
+
+            // 构建邮件内容
+            let emailBody = `WordPress 自动发布每日报告\n`;
+            emailBody += `日期: ${dateStr}\n`;
+            emailBody += `================================\n\n`;
+            emailBody += `📊 过去 24 小时统计:\n`;
+            emailBody += `   总运行次数: ${total}\n`;
+            emailBody += `   成功: ${success} ✓\n`;
+            emailBody += `   失败: ${failure} ✗\n`;
+            emailBody += `   状态: ${statusEmoji} ${statusText}\n\n`;
+            emailBody += `📋 详细记录:\n`;
+            emailBody += `--------------------------------\n`;
+
+            for (const d of details) {
+              const icon = d.status === 'success' ? '✓' : (d.status === 'failure' ? '✗' : '⋯');
+              emailBody += `${d.time} | ${icon} ${d.status}\n`;
+            }
+
+            if (details.length === 0) {
+              emailBody += `(无运行记录)\n`;
+            }
+
+            emailBody += `\n================================\n`;
+            emailBody += `GitHub Actions: https://github.com/${context.repo.owner}/${context.repo.repo}/actions\n`;
+
+            // 设置输出
+            core.setOutput('date', dateStr);
+            core.setOutput('total', total);
+            core.setOutput('success', success);
+            core.setOutput('failure', failure);
+            core.setOutput('status_emoji', statusEmoji);
+            core.setOutput('status_text', statusText);
+            core.setOutput('email_body', emailBody);
+
+            return { total, success, failure, details };
+
+      - name: Send email report
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "${{ steps.get_runs.outputs.status_emoji }} WordPress发布报告 ${{ steps.get_runs.outputs.date }} - ${{ steps.get_runs.outputs.status_text }}"
+          to: Joseph.siyi@gmail.com
+          from: WordPress Auto Publisher <${{ secrets.GMAIL_USERNAME }}>
+          body: ${{ steps.get_runs.outputs.email_body }}
